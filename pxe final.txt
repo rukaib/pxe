@@ -1,0 +1,493 @@
+# Ah! You Want to Test PXE INSIDE VirtualBox
+
+## 💡 **Understanding What You Want**
+
+```
+You want to create:
+┌─────────────────────────────────────────┐
+│ Your Windows PC                         │
+│  ┌───────────────────────────────────┐  │
+│  │ VirtualBox                        │  │
+│  │  ┌─────────────┐  ┌────────────┐ │  │
+│  │  │ Ubuntu VM   │  │ Client VM  │ │  │
+│  │  │ (PXE Server)│  │ (Test PC)  │ │  │
+│  │  │ 10.0.2.10   │  │ PXE Boot   │ │  │
+│  │  └─────────────┘  └────────────┘ │  │
+│  │         ↑                ↑        │  │
+│  │         └────VBox LAN────┘        │  │
+│  └───────────────────────────────────┘  │
+└─────────────────────────────────────────┘
+
+This is PERFECT for testing! ✅
+NAT mode is actually FINE for this!
+```
+
+---
+
+## ✅ **Perfect! NAT Network is IDEAL for Testing**
+
+You don't need bridged mode if you're testing inside VirtualBox only!
+
+---
+
+## 🚀 **Setup: PXE Server + Test Client (Both VMs)**
+
+### **Step 1: Create NAT Network in VirtualBox**
+
+```
+1. Close all VMs (shutdown Ubuntu if running)
+
+2. VirtualBox Manager → File → Preferences
+
+3. Click "Network" on the left
+
+4. Click "NAT Networks" tab
+
+5. Click the green "+" icon (Add new NAT network)
+
+6. You'll see a new network created:
+   Name: NatNetwork
+   IPv4 Prefix: 10.0.2.0/24
+   
+   Keep these defaults ✅
+
+7. Click OK
+```
+
+---
+
+### **Step 2: Connect Ubuntu PXE Server to NAT Network**
+
+```
+1. Select "Ubuntu-PXE-Server" VM
+2. Settings → Network → Adapter 1
+
+3. Configure like this:
+   ┌────────────────────────────────────────┐
+   │ ☑ Enable Network Adapter               │
+   │                                         │
+   │ Attached to: [NAT Network]  ✅         │
+   │ Name: [NatNetwork]          ✅         │
+   │                                         │
+   │ Advanced ▼                              │
+   │   Adapter Type: Intel PRO/1000 MT      │
+   │   Promiscuous Mode: Allow All          │
+   │   ☑ Cable Connected                    │
+   └────────────────────────────────────────┘
+
+4. Click OK
+```
+
+---
+
+### **Step 3: Start Ubuntu and Configure Static IP**
+
+```bash
+# Start Ubuntu VM and login
+
+# Check current IP
+ip addr show enp0s3
+
+# Should show something like: 10.0.2.15 (that's fine!)
+
+# Edit network config
+sudo nano /etc/netplan/00-installer-config.yaml
+```
+
+**Change to:**
+```yaml
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    enp0s3:
+      dhcp4: false
+      addresses:
+        - 10.0.2.10/24
+      routes:
+        - to: default
+          via: 10.0.2.1
+      nameservers:
+        addresses:
+          - 8.8.8.8
+          - 8.8.4.4
+```
+
+```bash
+# Save: Ctrl+O, Enter, Ctrl+X
+
+# Apply
+sudo netplan apply
+
+# Verify
+ip addr show enp0s3
+# Should now show: 10.0.2.10/24 ✅
+
+# Test internet
+ping -c 3 google.com
+```
+
+---
+
+### **Step 4: Configure PXE Server (dnsmasq)**
+
+```bash
+# Stop and disable default DHCP from VirtualBox
+# (We'll use our own dnsmasq DHCP)
+
+# Configure dnsmasq
+sudo nano /etc/dnsmasq.conf
+```
+
+**Add this configuration:**
+```conf
+# Disable DNS
+port=0
+
+# Network interface
+interface=enp0s3
+bind-interfaces
+
+# DHCP settings
+dhcp-range=10.0.2.100,10.0.2.200,12h
+dhcp-option=3,10.0.2.1      # Gateway
+dhcp-option=6,8.8.8.8       # DNS
+
+# Disable default route from VirtualBox
+dhcp-option=3
+
+# PXE Boot options
+dhcp-match=set:bios,option:client-arch,0
+dhcp-match=set:efi64,option:client-arch,7
+dhcp-match=set:efi64,option:client-arch,9
+
+dhcp-boot=tag:bios,pxelinux.0
+dhcp-boot=tag:efi64,bootx64.efi
+
+# TFTP settings
+enable-tftp
+tftp-root=/srv/tftp
+
+# Logging
+log-dhcp
+log-queries
+```
+
+```bash
+# Save and exit
+
+# Create TFTP directories
+sudo mkdir -p /srv/tftp/{pxelinux.cfg,Boot,sources}
+
+# Copy PXE boot files
+sudo cp /usr/lib/PXELINUX/pxelinux.0 /srv/tftp/
+sudo cp /usr/lib/syslinux/modules/bios/*.c32 /srv/tftp/
+
+# Create simple boot menu
+sudo nano /srv/tftp/pxelinux.cfg/default
+```
+
+**Boot menu:**
+```
+DEFAULT vesamenu.c32
+TIMEOUT 100
+PROMPT 0
+
+MENU TITLE === PXE Boot Test Menu ===
+MENU COLOR screen 37;40
+MENU COLOR border 30;44
+MENU COLOR title 1;36;44
+MENU COLOR sel 7;37;40
+
+LABEL local
+    MENU LABEL Boot from Local Hard Drive
+    LOCALBOOT 0
+
+LABEL test
+    MENU LABEL Test - Boot to Command Prompt
+    KERNEL memdisk
+    APPEND raw
+```
+
+```bash
+# Save and exit
+
+# Restart dnsmasq
+sudo systemctl restart dnsmasq
+
+# Check status
+sudo systemctl status dnsmasq
+
+# Should say "active (running)" ✅
+
+# Monitor DHCP requests (keep this running)
+sudo tail -f /var/log/syslog | grep dnsmasq
+```
+
+---
+
+### **Step 5: Create Client Test VM**
+
+Now create a second VM to test PXE boot:
+
+```
+1. VirtualBox Manager → New
+
+2. Name and OS:
+   Name: PXE-Test-Client
+   Type: Microsoft Windows
+   Version: Windows 10 (64-bit)
+   
+3. Memory: 2048 MB
+
+4. Hard disk: 
+   ○ Do not add a virtual hard disk  ← SELECT THIS!
+   (We'll test PXE boot without disk first)
+   
+5. Click Create
+
+6. You'll get a warning - click "Continue"
+```
+
+---
+
+### **Step 6: Configure Client VM Network**
+
+```
+1. Select "PXE-Test-Client"
+2. Settings → Network → Adapter 1
+
+3. Configure:
+   ┌────────────────────────────────────────┐
+   │ ☑ Enable Network Adapter               │
+   │                                         │
+   │ Attached to: [NAT Network]  ✅         │
+   │ Name: [NatNetwork]          ✅         │
+   │                                         │
+   │ Advanced ▼                              │
+   │   Adapter Type: Intel PRO/1000 MT      │
+   │   ☑ Cable Connected                    │
+   └────────────────────────────────────────┘
+
+4. Settings → System → Motherboard
+
+5. Boot Order:
+   ☑ Network  ← Move this to TOP
+   ☐ Optical
+   ☐ Hard Disk
+   
+6. Click OK
+```
+
+---
+
+### **Step 7: Test PXE Boot!**
+
+```
+1. Make sure Ubuntu PXE Server VM is running
+   (The one with dnsmasq running)
+
+2. Start "PXE-Test-Client" VM
+
+3. You should see:
+```
+
+**Expected boot sequence:**
+```
+VirtualBox VM starting...
+Booting from LAN...
+CLIENT MAC ADDR: 08 00 27 XX XX XX
+CLIENT IP: 10.0.2.100  MASK: 255.255.255.0  DHCP IP: 10.0.2.10
+GATEWAY IP: 10.0.2.1
+TFTP Server IP: 10.0.2.10
+Loading pxelinux.0...
+```
+
+**Then you should see your boot menu!**
+```
+╔═══════════════════════════════════════════╗
+║     === PXE Boot Test Menu ===            ║
+║                                           ║
+║  > Boot from Local Hard Drive             ║
+║    Test - Boot to Command Prompt          ║
+║                                           ║
+╚═══════════════════════════════════════════╝
+```
+
+---
+
+## 🎉 **SUCCESS! If You See This:**
+
+```
+✅ PXE boot working!
+✅ DHCP server responding
+✅ TFTP serving files
+✅ Boot menu displayed
+
+This proves your PXE server works!
+```
+
+---
+
+## 🪟 **Step 8: Add Windows Boot (Optional)**
+
+To actually install Windows via PXE:
+
+### **Option A: Simple Test with Tiny Linux**
+
+```bash
+# On Ubuntu PXE Server VM
+
+# Download a small Linux ISO for testing
+cd /tmp
+wget http://tinycorelinux.net/13.x/x86/release/TinyCore-current.iso
+
+# Mount it
+sudo mkdir -p /mnt/iso
+sudo mount -o loop TinyCore-current.iso /mnt/iso
+
+# Copy kernel and initrd to TFTP
+sudo cp /mnt/iso/boot/vmlinuz /srv/tftp/
+sudo cp /mnt/iso/boot/core.gz /srv/tftp/
+
+# Update boot menu
+sudo nano /srv/tftp/pxelinux.cfg/default
+```
+
+**Add this label:**
+```
+LABEL tinycore
+    MENU LABEL Boot Tiny Core Linux (Test)
+    KERNEL vmlinuz
+    APPEND initrd=core.gz
+```
+
+```bash
+# Save and test!
+```
+
+---
+
+### **Option B: Windows Installation**
+
+For Windows, you need to create WinPE boot image (requires Windows):
+
+**On your Windows host, download:**
+1. Windows ADK
+2. Windows PE add-on
+
+**Then create boot.wim** (covered in previous guides)
+
+**Transfer to Ubuntu VM via shared folder:**
+```bash
+# Copy Windows files to serve via SMB
+sudo cp /mnt/windows-files/Windows10/* /srv/windows/ -r
+```
+
+---
+
+## 📊 **Your Complete Virtual Lab Setup**
+
+```
+┌─────────────────────────────────────────────────┐
+│ Windows Host PC                                 │
+│  ┌───────────────────────────────────────────┐  │
+│  │ VirtualBox                                │  │
+│  │  ┌──────────────────────────────────────┐ │  │
+│  │  │ NAT Network: 10.0.2.0/24             │ │  │
+│  │  │  Gateway: 10.0.2.1 (VBox internal)   │ │  │
+│  │  └──────────────────────────────────────┘ │  │
+│  │           │                       │        │  │
+│  │  ┌────────▼─────────┐   ┌────────▼──────┐ │  │
+│  │  │ Ubuntu VM        │   │ Client VM     │ │  │
+│  │  │ IP: 10.0.2.10    │   │ PXE Boot      │ │  │
+│  │  │ Services:        │   │ Gets IP from  │ │  │
+│  │  │ - dnsmasq (DHCP) │   │ dnsmasq       │ │  │
+│  │  │ - tftpd (TFTP)   │   │               │ │  │
+│  │  │ - samba (SMB)    │   │               │ │  │
+│  │  └──────────────────┘   └───────────────┘ │  │
+│  └───────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────┘
+```
+
+---
+
+## 🔧 **Monitoring and Debugging**
+
+### **In Ubuntu PXE Server VM:**
+
+**Terminal 1 - Watch DHCP:**
+```bash
+sudo tail -f /var/log/syslog | grep dnsmasq
+```
+
+**Terminal 2 - Watch TFTP:**
+```bash
+sudo tail -f /var/log/syslog | grep tftpd
+```
+
+**Check services:**
+```bash
+sudo systemctl status dnsmasq tftpd-hpa smbd
+```
+
+**Check network:**
+```bash
+ip addr show
+netstat -ulnp | grep :67  # DHCP
+netstat -ulnp | grep :69  # TFTP
+```
+
+---
+
+## ⚡ **Quick Test Commands**
+
+```bash
+# Test DHCP is listening
+sudo netstat -ulnp | grep dnsmasq
+
+# Test TFTP files are accessible
+ls -la /srv/tftp/pxelinux.0
+
+# Test from client (when it boots)
+# You should see in logs:
+# dnsmasq-dhcp[xxx]: DHCPDISCOVER(enp0s3) 08:00:27:xx:xx:xx
+# dnsmasq-dhcp[xxx]: DHCPOFFER(enp0s3) 10.0.2.100 08:00:27:xx:xx:xx
+# dnsmasq-tftp[xxx]: sent /srv/tftp/pxelinux.0 to 10.0.2.100
+```
+
+---
+
+## 🎯 **Action Plan Right Now**
+
+```
+1. ✅ Keep your Ubuntu VM with IP 10.0.2.15 (or change to 10.0.2.10)
+   (NAT Network is PERFECT for testing!)
+
+2. ✅ Install and configure dnsmasq (DHCP + TFTP)
+   sudo apt install dnsmasq tftpd-hpa syslinux pxelinux -y
+
+3. ✅ Create TFTP boot files
+   sudo mkdir -p /srv/tftp/pxelinux.cfg
+   sudo cp /usr/lib/PXELINUX/pxelinux.0 /srv/tftp/
+
+4. ✅ Create test client VM (no hard disk)
+   VirtualBox → New → No hard disk → Boot from Network
+
+5. ✅ Boot client VM and watch the magic! 🎉
+```
+
+---
+
+## ❓ **Next Steps - What Do You Want?**
+
+**A) Test PXE boot with simple menu first?**
+→ I'll give you exact commands to copy-paste
+
+**B) Set up Windows installation?**
+→ Need to create WinPE first
+
+**C) Just want to see it working?**
+→ Use Tiny Core Linux (5 minute setup)
+
+**Which would you like to try first?** Let me know and I'll provide the exact commands! 🚀

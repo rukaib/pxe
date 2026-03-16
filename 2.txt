@@ -1,0 +1,638 @@
+# Creating Your Own PXE Server from Scratch (No Third-Party Software)
+
+## 📋 Required Items
+
+### Hardware
+```
+1. Linux Server (Ubuntu/Debian recommended) OR Windows Server
+2. Client PC (target installation machine)
+3. Cat6 Ethernet Cable
+4. Network Switch (optional, for multiple clients)
+5. Static IP capability on server
+```
+
+### Software (Open Source/Built-in Only)
+```
+1. DHCP Server (dnsmasq on Linux / DHCP Server role on Windows)
+2. TFTP Server (tftpd-hpa on Linux / TFTP role on Windows)
+3. HTTP/NFS Server (nginx/apache OR Windows IIS)
+4. Samba/SMB (for file sharing)
+5. Windows ADK + WinPE (from Microsoft, free)
+6. Windows ISO file
+```
+
+---
+
+## 🐧 METHOD 1: Linux-Based PXE Server (Recommended)
+
+### Step 1: Install Ubuntu Server
+
+```bash
+# Update system
+sudo apt update && sudo apt upgrade -y
+
+# Install required packages
+sudo apt install dnsmasq tftpd-hpa nginx samba -y
+```
+
+---
+
+### Step 2: Configure Network Interface (Static IP)
+
+```bash
+# Edit netplan configuration
+sudo nano /etc/netplan/01-netcfg.yaml
+```
+
+**Add this configuration:**
+```yaml
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    ens33:  # Your interface name (check with 'ip a')
+      addresses:
+        - 192.168.1.1/24
+      dhcp4: no
+      optional: true
+```
+
+```bash
+# Apply network configuration
+sudo netplan apply
+
+# Verify
+ip addr show
+```
+
+---
+
+### Step 3: Configure TFTP Server
+
+```bash
+# Edit TFTP configuration
+sudo nano /etc/default/tftpd-hpa
+```
+
+**Configuration:**
+```bash
+TFTP_USERNAME="tftp"
+TFTP_DIRECTORY="/srv/tftp"
+TFTP_ADDRESS="0.0.0.0:69"
+TFTP_OPTIONS="--secure --create"
+```
+
+```bash
+# Create TFTP directory
+sudo mkdir -p /srv/tftp
+sudo chown -R tftp:tftp /srv/tftp
+sudo chmod -R 755 /srv/tftp
+
+# Restart TFTP service
+sudo systemctl restart tftpd-hpa
+sudo systemctl enable tftpd-hpa
+sudo systemctl status tftpd-hpa
+```
+
+---
+
+### Step 4: Configure DHCP Server (dnsmasq)
+
+```bash
+# Backup original config
+sudo mv /etc/dnsmasq.conf /etc/dnsmasq.conf.backup
+
+# Create new configuration
+sudo nano /etc/dnsmasq.conf
+```
+
+**For BIOS (Legacy) Boot:**
+```conf
+# Disable DNS (we only need DHCP)
+port=0
+
+# DHCP Configuration
+interface=ens33                     # Your network interface
+dhcp-range=192.168.1.100,192.168.1.200,24h
+dhcp-option=3,192.168.1.1           # Gateway
+dhcp-option=6,8.8.8.8,8.8.4.4       # DNS servers
+
+# PXE Boot Settings (BIOS)
+dhcp-boot=pxeboot.0
+
+# Enable TFTP
+enable-tftp
+tftp-root=/srv/tftp
+
+# Logging
+log-dhcp
+log-facility=/var/log/dnsmasq.log
+```
+
+**For UEFI Boot:**
+```conf
+# Add these lines instead of dhcp-boot=pxeboot.0
+dhcp-match=set:efi-x86_64,option:client-arch,7
+dhcp-match=set:efi-x86_64,option:client-arch,9
+dhcp-match=set:bios,option:client-arch,0
+
+dhcp-boot=tag:efi-x86_64,bootx64.efi
+dhcp-boot=tag:bios,pxeboot.0
+```
+
+```bash
+# Restart dnsmasq
+sudo systemctl restart dnsmasq
+sudo systemctl enable dnsmasq
+sudo systemctl status dnsmasq
+```
+
+---
+
+### Step 5: Create WinPE Boot Environment
+
+You need a Windows machine temporarily for this step:
+
+#### On Windows Machine:
+
+```powershell
+# Install Windows ADK
+# Download from: https://docs.microsoft.com/en-us/windows-hardware/get-started/adk-install
+
+# Install only these components:
+# - Deployment Tools
+# - Windows Preinstallation Environment (Windows PE)
+
+# Open "Deployment and Imaging Tools Environment" as Administrator
+
+# Create WinPE working files
+copype amd64 C:\WinPE_amd64
+
+# Mount the WinPE image
+Dism /Mount-Wim /WimFile:C:\WinPE_amd64\media\sources\boot.wim /index:1 /MountDir:C:\WinPE_amd64\mount
+```
+
+#### Create Startup Script:
+
+```powershell
+# Create startnet.cmd
+notepad C:\WinPE_amd64\mount\Windows\System32\startnet.cmd
+```
+
+**Add this content:**
+```batch
+@echo off
+wpeinit
+echo Initializing Network...
+ipconfig /renew
+
+echo Mapping Network Drive...
+net use Z: \\192.168.1.1\WinInstall /user:guest ""
+
+echo Starting Windows Setup...
+if exist Z:\setup.exe (
+    Z:\setup.exe
+) else (
+    echo ERROR: Cannot find setup.exe
+    pause
+)
+```
+
+```powershell
+# Unmount and save changes
+Dism /Unmount-Wim /MountDir:C:\WinPE_amd64\mount /Commit
+
+# The boot.wim is now ready at:
+# C:\WinPE_amd64\media\sources\boot.wim
+```
+
+---
+
+### Step 6: Setup PXE Boot Files on Linux Server
+
+#### Transfer files from Windows to Linux:
+
+```bash
+# On Linux server, create directory structure
+sudo mkdir -p /srv/tftp/Boot
+
+# Transfer these files from Windows ADK to Linux:
+# From C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment\amd64\Media\Boot\
+
+# You need these files in /srv/tftp/Boot/:
+# - BCD (UEFI boot configuration)
+# - boot.sdi
+# - bootmgr.exe (rename to bootmgr)
+# - bootmgfw.efi (for UEFI)
+
+# For BIOS boot, also need:
+# - pxeboot.n12 or pxeboot.0
+# - bootmgr
+```
+
+#### Using SCP to transfer (from Windows with WinSCP or Linux):
+
+```bash
+# On Windows (PowerShell with OpenSSH):
+scp "C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Windows Preinstallation Environment\amd64\Media\Boot\*" user@192.168.1.1:/srv/tftp/Boot/
+
+# On Linux server:
+cd /srv/tftp/Boot
+sudo mv bootmgr.exe bootmgr
+sudo chmod 644 *
+```
+
+#### Setup pxelinux for BIOS boot:
+
+```bash
+# Install syslinux
+sudo apt install syslinux pxelinux -y
+
+# Copy pxelinux files
+sudo cp /usr/lib/PXELINUX/pxelinux.0 /srv/tftp/
+sudo cp /usr/lib/syslinux/modules/bios/*.c32 /srv/tftp/
+
+# Create pxelinux config directory
+sudo mkdir -p /srv/tftp/pxelinux.cfg
+```
+
+**Create boot menu:**
+```bash
+sudo nano /srv/tftp/pxelinux.cfg/default
+```
+
+```
+DEFAULT menu.c32
+PROMPT 0
+TIMEOUT 100
+MENU TITLE PXE Boot Menu
+
+LABEL windows
+    MENU LABEL Install Windows 10/11
+    KERNEL /Boot/bootmgr
+    INITRD /Boot/boot.sdi
+    APPEND /Boot/BCD
+
+LABEL local
+    MENU LABEL Boot from Local Disk
+    LOCALBOOT 0
+```
+
+---
+
+### Step 7: Setup HTTP Server for Windows Files
+
+```bash
+# Configure nginx
+sudo nano /etc/nginx/sites-available/wininstall
+```
+
+**Add configuration:**
+```nginx
+server {
+    listen 80;
+    server_name 192.168.1.1;
+    
+    root /srv/windows;
+    autoindex on;
+    
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}
+```
+
+```bash
+# Enable site
+sudo ln -s /etc/nginx/sites-available/wininstall /etc/nginx/sites-enabled/
+sudo systemctl restart nginx
+sudo systemctl enable nginx
+
+# Create Windows files directory
+sudo mkdir -p /srv/windows
+sudo chmod -R 755 /srv/windows
+```
+
+---
+
+### Step 8: Setup Samba (SMB) Share
+
+```bash
+# Configure Samba
+sudo nano /etc/samba/smb.conf
+```
+
+**Add at the end:**
+```ini
+[WinInstall]
+    path = /srv/windows
+    browseable = yes
+    read only = yes
+    guest ok = yes
+    guest only = yes
+    force user = nobody
+    create mask = 0644
+    directory mask = 0755
+```
+
+```bash
+# Restart Samba
+sudo systemctl restart smbd
+sudo systemctl enable smbd
+
+# Test configuration
+testparm
+```
+
+---
+
+### Step 9: Extract Windows ISO
+
+```bash
+# Mount Windows ISO
+sudo mkdir /mnt/windows_iso
+sudo mount -o loop /path/to/windows.iso /mnt/windows_iso
+
+# Copy all contents to web/samba directory
+sudo cp -r /mnt/windows_iso/* /srv/windows/
+
+# Set permissions
+sudo chmod -R 755 /srv/windows
+
+# Unmount ISO
+sudo umount /mnt/windows_iso
+```
+
+---
+
+### Step 10: Copy WinPE boot.wim
+
+```bash
+# Copy your custom boot.wim from Windows machine
+# Place it at:
+sudo mkdir -p /srv/tftp/sources
+# Transfer boot.wim to /srv/tftp/sources/boot.wim
+
+sudo chmod 644 /srv/tftp/sources/boot.wim
+```
+
+---
+
+### Step 11: Configure Firewall
+
+```bash
+# Allow DHCP, TFTP, HTTP, SMB
+sudo ufw allow 67/udp    # DHCP
+sudo ufw allow 69/udp    # TFTP
+sudo ufw allow 80/tcp    # HTTP
+sudo ufw allow 445/tcp   # SMB
+sudo ufw allow 139/tcp   # SMB
+
+# Or disable firewall for testing
+sudo ufw disable
+```
+
+---
+
+## 🪟 METHOD 2: Windows Server-Based PXE (Pure Microsoft)
+
+### Step 1: Install Windows Server Roles
+
+```powershell
+# Run PowerShell as Administrator
+
+# Install required roles
+Install-WindowsFeature -Name DHCP -IncludeManagementTools
+Install-WindowsFeature -Name WDS -IncludeManagementTools
+Install-WindowsFeature -Name FS-FileServer
+```
+
+### Step 2: Configure DHCP Server
+
+```powershell
+# Add DHCP Server
+Add-DhcpServerv4Scope -Name "PXE Network" -StartRange 192.168.1.100 -EndRange 192.168.1.200 -SubnetMask 255.255.255.0
+
+# Set DHCP Options
+Set-DhcpServerv4OptionValue -ScopeId 192.168.1.0 -Router 192.168.1.1
+Set-DhcpServerv4OptionValue -ScopeId 192.168.1.0 -DnsServer 8.8.8.8
+
+# Authorize DHCP Server
+Add-DhcpServerInDC -DnsName "YourServerName" -IPAddress 192.168.1.1
+
+# Restart DHCP
+Restart-Service DHCPServer
+```
+
+### Step 3: Configure WDS (Windows Deployment Services)
+
+```powershell
+# Initialize WDS
+wdsutil /Initialize-Server /RemInst:"C:\RemoteInstall"
+
+# Configure WDS
+wdsutil /Set-Server /AnswerClients:All
+
+# Start WDS
+wdsutil /Start-Server
+```
+
+#### Using WDS GUI:
+
+```
+1. Open "Windows Deployment Services" MMC
+2. Right-click server → Configure Server
+3. Choose "Standalone server"
+4. Set RemoteInstall location: C:\RemoteInstall
+5. Check "Respond to all client computers"
+6. Finish wizard
+```
+
+### Step 4: Add Boot Image to WDS
+
+```powershell
+# Add WinPE boot image
+wdsutil /Add-Image /ImageFile:"C:\WinPE_amd64\media\sources\boot.wim" /ImageType:Boot
+```
+
+Or via GUI:
+```
+WDS Console → Boot Images → Right-click → Add Boot Image
+Browse to boot.wim → Add
+```
+
+### Step 5: Add Windows Install Image
+
+```powershell
+# Create install image group
+wdsutil /Add-ImageGroup /ImageGroup:"Windows 10"
+
+# Add install.wim from Windows ISO
+wdsutil /Add-Image /ImageFile:"D:\sources\install.wim" /ImageType:Install /ImageGroup:"Windows 10"
+```
+
+---
+
+## 🔧 Directory Structure (Final)
+
+### Linux Server:
+```
+/srv/
+├── tftp/
+│   ├── pxelinux.0
+│   ├── pxelinux.cfg/
+│   │   └── default
+│   ├── Boot/
+│   │   ├── BCD
+│   │   ├── boot.sdi
+│   │   ├── bootmgr
+│   │   └── bootmgfw.efi
+│   ├── sources/
+│   │   └── boot.wim
+│   └── *.c32 files
+│
+└── windows/
+    ├── boot/
+    ├── efi/
+    ├── sources/
+    │   ├── boot.wim
+    │   └── install.wim
+    ├── bootmgr
+    └── setup.exe
+```
+
+### Windows Server:
+```
+C:\RemoteInstall\
+├── Boot/
+│   ├── x64/
+│   │   ├── pxeboot.n12
+│   │   └── bootmgr.exe
+│   └── x86/
+├── Images/
+│   ├── Windows 10/
+│   │   └── install.wim
+│   └── boot.wim
+└── Tmp/
+```
+
+---
+
+## 🚀 Client Boot Process
+
+### Step 1: Configure Client BIOS/UEFI
+
+```
+1. Enter BIOS/UEFI (usually F2, F12, Del)
+2. Go to Boot Options
+3. Enable "Network Boot" or "PXE Boot"
+4. Set Network Boot as first boot device
+5. Disable Secure Boot (for UEFI)
+6. Save and Exit
+```
+
+### Step 2: Boot Sequence
+
+```
+Client Powers On
+      ↓
+PXE ROM initializes
+      ↓
+DHCP Request → Server assigns IP + Boot file
+      ↓
+TFTP Request → Downloads boot files
+      ↓
+WinPE loads into RAM
+      ↓
+Network drive maps to \\192.168.1.1\WinInstall
+      ↓
+setup.exe launches
+      ↓
+Windows Installation begins
+```
+
+---
+
+## 🔍 Debugging & Testing
+
+### Test DHCP:
+
+```bash
+# On Linux server
+sudo tail -f /var/log/syslog | grep dnsmasq
+
+# On Windows server
+Get-DhcpServerv4Lease -ScopeId 192.168.1.0
+```
+
+### Test TFTP:
+
+```bash
+# From another machine
+tftp 192.168.1.1
+> get pxelinux.0
+> quit
+```
+
+### Test SMB Share:
+
+```bash
+# From Linux
+smbclient -L //192.168.1.1 -N
+
+# From Windows
+net view \\192.168.1.1
+```
+
+### Monitor Boot Process:
+
+```bash
+# Watch all logs
+sudo tail -f /var/log/syslog
+```
+
+---
+
+## 📊 Performance Comparison
+
+```
+╔═══════════════════════════════════════════════════╗
+║ Connection     | Speed      | 4GB Transfer Time  ║
+╠═══════════════════════════════════════════════════╣
+║ USB 2.0        | 30 MB/s    | ~2 minutes         ║
+║ USB 3.0        | 100 MB/s   | ~40 seconds        ║
+║ Cat6 (1Gbps)   | 125 MB/s   | ~32 seconds        ║
+║ Cat6 (10Gbps)  | 1000+ MB/s | ~4 seconds         ║
+╚═══════════════════════════════════════════════════╝
+
+Real Advantage: Deploy 50 PCs simultaneously!
+```
+
+---
+
+## ⚠️ Common Issues & Fixes
+
+| Issue | Solution |
+|-------|----------|
+| PXE-E53: No boot filename | Check DHCP config, ensure boot file path is correct |
+| TFTP timeout | Check firewall, ensure tftpd-hpa is running |
+| "BOOTMGR is missing" | Wrong boot files, check BCD configuration |
+| Can't map network drive | SMB not configured correctly, check samba |
+| Slow transfer | Use Gigabit switch, check cable quality |
+
+### Complete Test Command:
+
+```bash
+# Check all services on Linux
+sudo systemctl status dnsmasq tftpd-hpa nginx smbd
+
+# Check ports
+sudo netstat -tulpn | grep -E '67|69|80|445'
+
+# Test complete chain
+sudo tcpdump -i ens33 port 67 or port 69
+```
+
+---
+
+This is a **complete from-scratch PXE server** with no third-party tools (only open-source standards). You now have full control over every component!

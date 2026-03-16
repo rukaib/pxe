@@ -1,0 +1,304 @@
+# PXE Server Setup for Windows Network Installation
+
+## 📋 Required Items
+
+### Hardware
+```
+1. Server PC/Laptop (to act as PXE server)
+2. Client PC (where Windows will be installed)
+3. Cat6 Ethernet Cable (direct connection OR through switch)
+4. Network Switch/Router (optional, for multiple clients)
+5. Minimum 8GB RAM on server (recommended)
+6. Sufficient storage for Windows ISO files
+```
+
+### Software
+```
+1. Windows ADK (Assessment and Deployment Kit)
+2. Windows PE (Preinstallation Environment)
+3. TFTP Server (Tftpd64 or Serva - easiest options)
+4. DHCP Server (built into Tftpd64/Serva)
+5. Windows ISO file(s)
+6. Samba/File sharing (for image hosting)
+```
+
+---
+
+## 🧠 Required Knowledge
+
+```
+1. Basic Networking (IP addressing, DHCP, subnets)
+2. Understanding of PXE Boot process
+3. Windows PE basics
+4. TFTP/DHCP configuration
+5. Basic command line (CMD/PowerShell)
+6. BIOS/UEFI boot settings
+7. Disk partitioning concepts
+```
+
+---
+
+## 🔄 How PXE Boot Works
+
+```
+CLIENT                          SERVER
+  |                               |
+  |--1. PXE Boot Request (DHCP)-->|
+  |<--2. IP Address + Boot File---|
+  |--3. Request Boot File (TFTP)->|
+  |<--4. Send WinPE Boot Image----|
+  |--5. WinPE Loads in RAM------->|
+  |--6. Maps Network Drive------->|
+  |<--7. Access Windows Files-----|
+  |--8. Windows Setup Starts----->|
+  |       (Installation)          |
+```
+
+---
+
+## 🛠️ Step-by-Step Setup
+
+### METHOD 1: Using **Serva** (EASIEST)
+
+#### Step 1: Download & Setup Serva
+```
+1. Download Serva from: https://www.vercot.com/~serva/
+2. Extract to a folder (e.g., C:\Serva)
+3. Run as Administrator
+```
+
+#### Step 2: Configure Network (Static IP on Server)
+```
+Server IP:     192.168.1.1
+Subnet Mask:   255.255.255.0
+Gateway:       (leave blank for direct connection)
+DNS:           (leave blank)
+```
+
+**How to set static IP:**
+```
+Control Panel → Network → Ethernet Adapter → Properties
+→ IPv4 → Use following IP → 192.168.1.1
+```
+
+#### Step 3: Configure Serva Settings
+
+**DHCP Tab:**
+```
+☑ DHCP Server = ON
+IP Pool Start:    192.168.1.100
+IP Pool End:      192.168.1.200
+Subnet Mask:      255.255.255.0
+Boot File:        (auto-configured)
+```
+
+**TFTP Tab:**
+```
+☑ TFTP Server = ON
+TFTP Root Directory: C:\Serva\TFTP_Root
+```
+
+#### Step 4: Add Windows ISO
+```
+1. Create folder: C:\Serva\TFTP_Root\WIA_WDS\
+2. Create subfolder: C:\Serva\TFTP_Root\WIA_WDS\Win10\
+3. Copy ALL contents of Windows ISO into Win10 folder
+   (Mount ISO → Copy everything)
+4. Restart Serva (it will auto-configure boot files)
+```
+
+**Folder Structure:**
+```
+C:\Serva\
+├── Serva.exe
+└── TFTP_Root\
+    └── WIA_WDS\
+        ├── Win10\
+        │   ├── boot\
+        │   ├── efi\
+        │   ├── sources\
+        │   ├── support\
+        │   ├── autorun.inf
+        │   ├── bootmgr
+        │   ├── bootmgr.efi
+        │   └── setup.exe
+        └── Win11\  (optional, another version)
+```
+
+#### Step 5: Boot Client from Network
+```
+1. Connect Cat6 cable: Server <---> Client
+2. Client BIOS/UEFI → Boot Order → Network/PXE Boot FIRST
+3. Save & Restart Client
+4. Client will PXE boot and show Windows Setup
+```
+
+---
+
+### METHOD 2: Using **Tftpd64** (More Control)
+
+#### Step 1: Install Required Tools
+```powershell
+# Download these:
+1. Tftpd64 - https://pjo2.github.io/tftpd64/
+2. Windows ADK - from Microsoft website
+3. Windows PE add-on for ADK
+```
+
+#### Step 2: Create WinPE Boot Image
+```powershell
+# Open "Deployment and Imaging Tools Environment" as Admin
+
+# Create WinPE working directory
+copype amd64 C:\WinPE
+
+# Mount the boot image
+Dism /Mount-Image /ImageFile:C:\WinPE\media\sources\boot.wim /index:1 /MountDir:C:\WinPE\mount
+
+# Add network drivers (if needed)
+Dism /Image:C:\WinPE\mount /Add-Driver /Driver:C:\Drivers /Recurse
+
+# Create startup script to map network drive
+notepad C:\WinPE\mount\Windows\System32\startnet.cmd
+```
+
+**startnet.cmd content:**
+```batch
+wpeinit
+net use Z: \\192.168.1.1\WinInstall
+Z:\setup.exe
+```
+
+```powershell
+# Unmount and save
+Dism /Unmount-Image /MountDir:C:\WinPE\mount /Commit
+```
+
+#### Step 3: Configure Tftpd64
+```
+DHCP Settings:
+  IP Pool Start:     192.168.1.100
+  Size of Pool:      50
+  Boot File:         boot\pxeboot.n12  (BIOS)
+                     boot\bootmgfw.efi (UEFI)
+  Mask:              255.255.255.0
+  
+TFTP Settings:
+  Base Directory:    C:\WinPE\media
+  Security:          None
+```
+
+#### Step 4: Share Windows Installation Files
+```
+1. Create folder: C:\WinInstall
+2. Copy Windows ISO contents to C:\WinInstall
+3. Right-click → Properties → Sharing → Share
+4. Share name: WinInstall
+5. Permissions: Everyone → Read
+```
+
+---
+
+## ⚙️ BIOS vs UEFI Boot Settings
+
+### For BIOS (Legacy) Clients:
+```
+Boot file: boot\pxeboot.n12
+or:        pxeboot.n12
+```
+
+### For UEFI Clients:
+```
+Boot file: boot\bootmgfw.efi
+or:        bootx64.efi
+
+⚠️ Disable Secure Boot in UEFI settings!
+```
+
+---
+
+## 🔌 Network Connection Options
+
+### Option A: Direct Cable (2 PCs only)
+```
+[Server PC] ←——Cat6——→ [Client PC]
+
+Server IP: 192.168.1.1/24
+Client IP: Auto (DHCP from PXE server)
+```
+
+### Option B: Through Switch (Multiple Clients)
+```
+[Server PC] ←——Cat6——→ [Switch] ←——Cat6——→ [Client 1]
+                           ↕
+                      [Client 2]
+
+⚠️ Disable any other DHCP server on the network!
+```
+
+---
+
+## 🚀 Is Cat6 Faster Than Pendrive?
+
+```
+╔══════════════════════════════════════════════════╗
+║  Method          Speed          Transfer Rate    ║
+╠══════════════════════════════════════════════════╣
+║  USB 2.0         Slow           ~30 MB/s         ║
+║  USB 3.0         Fast           ~100-150 MB/s    ║
+║  Cat6 (1Gbps)    Fast           ~110-125 MB/s    ║
+║  Cat6 (2.5Gbps)  Very Fast      ~280 MB/s        ║
+║  USB 3.1/3.2     Very Fast      ~300-600 MB/s    ║
+╔══════════════════════════════════════════════════╗
+
+Verdict: Cat6 ≈ USB 3.0 speed
+         Cat6 < USB 3.1/3.2
+         Cat6 >> USB 2.0
+
+REAL ADVANTAGE: Deploy to MULTIPLE PCs simultaneously!
+```
+
+---
+
+## 🔧 Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| Client doesn't PXE boot | Enable Network Boot in BIOS/UEFI |
+| No IP received | Check DHCP config, firewall off on server |
+| TFTP timeout | Disable Windows Firewall on server |
+| Boot file not found | Check file paths in DHCP config |
+| UEFI won't boot | Disable Secure Boot |
+| Slow transfer | Check cable, use Gigabit NICs |
+| "WDS not configured" | Use Serva instead of WDS |
+
+### Firewall Fix (Run on Server):
+```powershell
+# Disable firewall temporarily
+netsh advfirewall set allprofiles state off
+
+# OR allow specific ports
+netsh advfirewall firewall add rule name="DHCP" dir=in action=allow protocol=udp localport=67
+netsh advfirewall firewall add rule name="TFTP" dir=in action=allow protocol=udp localport=69
+netsh advfirewall firewall add rule name="SMB" dir=in action=allow protocol=tcp localport=445
+```
+
+---
+
+## 📊 Quick Summary
+
+```
+EASIEST PATH:
+━━━━━━━━━━━━
+1. Download Serva (free/portable)
+2. Set static IP on server (192.168.1.1)
+3. Copy Windows ISO contents to Serva folder
+4. Start Serva
+5. Connect Cat6 cable
+6. PXE boot client
+7. Install Windows!
+
+Total setup time: ~30 minutes
+```
+
+> **💡 Pro Tip:** For deploying to many PCs (computer labs, offices), also look into **MDT (Microsoft Deployment Toolkit)** + **WDS (Windows Deployment Services)** — it supports unattended installations with custom configurations, drivers, and applications pre-installed.v
